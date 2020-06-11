@@ -22,6 +22,7 @@
 #include <folly/SharedMutex.h>
 #include <folly/SpinLock.h>
 #include <folly/ssl/Init.h>
+#include <folly/ssl/SSLSessionManager.h>
 #include <folly/system/ThreadId.h>
 
 // ---------------------------------------------------------------------
@@ -38,6 +39,7 @@ int getExDataIndex() {
 } // namespace
 
 namespace folly {
+
 //
 // For OpenSSL portability API
 
@@ -669,8 +671,22 @@ void SSLContext::enableTLS13() {
 }
 
 void SSLContext::setupCtx(SSL_CTX* ctx) {
-  // Client caching required for receiving sessions in TLS 1.3
-  // Default value from OpenSSL is SSL_SESS_CACHE_SERVER
+  // 1) folly::AsyncSSLSocket wants to unconditionally store a client
+  // session, so that is possible to later perform TLS resumption.
+  // For that, we need SSL_SESS_CACHE_CLIENT.
+  //
+  // 2) wangle::SSLSessionCacheManager needs to be able to receive
+  // SSL_SESSIONs that are established through a successful
+  // connection. For that, we need SSL_SESS_CACHE_SERVER. Consequently,
+  // given the requirements of (1), we opt to use SSL_SESS_CACHE_BOTH
+  //
+  // 3) We explicitly disable the OpenSSL internal session cache, as there
+  // is very little we can do to control the memory usage of the internal
+  // session cache. Server side session-id based caching should be explicitly
+  // opted-in by the user, by forcing them to provide an implementation of
+  // a SessionCache interface (e.g. wangle::SSLSessionCacheManager); i.e.,
+  // the user must be cognizant of the fact that doing so would result in
+  // increased memory usage.
   SSL_CTX_set_session_cache_mode(
       ctx,
       SSL_SESS_CACHE_BOTH | SSL_SESS_CACHE_NO_INTERNAL |
@@ -695,7 +711,14 @@ int SSLContext::newSessionCallback(SSL* ssl, SSL_SESSION* session) {
     cb->onNewSession(ssl, std::move(sessionPtr));
   }
 
-  SSL_SESSION_free(session);
+  // Session will either be moved to session manager or
+  // freed when the unique_ptr goes out of scope
+  auto sessionPtr = folly::ssl::SSLSessionUniquePtr(session);
+  auto sessionManager = folly::ssl::SSLSessionManager::getFromSSL(ssl);
+  if (sessionManager) {
+    sessionManager->onNewSession(std::move(sessionPtr));
+  }
+
   return 1;
 }
 

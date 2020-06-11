@@ -38,6 +38,7 @@
 #include <folly/fibers/TimedMutex.h>
 #include <folly/fibers/WhenN.h>
 #include <folly/fibers/async/Async.h>
+#include <folly/fibers/async/Baton.h>
 #include <folly/io/async/ScopedEventBaseThread.h>
 #include <folly/portability/GTest.h>
 
@@ -1477,6 +1478,10 @@ TEST(FiberManager, resizePeriodically) {
   evb.loopOnce();
   EXPECT_EQ(5, manager.fibersAllocated());
   EXPECT_EQ(5, manager.fibersPoolSize());
+
+  // Sleep again before destruction to force the case where the
+  // resize timer fires during destruction of the EventBase.
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
 }
 
 TEST(FiberManager, batonWaitTimeoutHandler) {
@@ -1736,10 +1741,10 @@ TEST(FiberManager, semaphore) {
 #endif
                   break;
                 case 2: {
-                  Baton baton;
-                  bool acquired = sem.try_wait(baton);
+                  Semaphore::Waiter waiter;
+                  bool acquired = sem.try_wait(waiter);
                   if (!acquired) {
-                    baton.wait();
+                    waiter.baton.wait();
                   }
                   break;
                 }
@@ -2673,6 +2678,38 @@ TEST(FiberManager, asyncAwait) {
           static_assert(
               std::is_same<decltype(ref), NonCopyableNonMoveable const&>::value,
               "");
+        })
+          .getVia(&evb));
+}
+
+TEST(FiberManager, asyncBaton) {
+  folly::EventBase evb;
+  auto& fm = getFiberManager(evb);
+  std::chrono::steady_clock::time_point start;
+
+  EXPECT_NO_THROW(
+      fm.addTaskFuture([&]() {
+          constexpr auto kTimeout = std::chrono::milliseconds(230);
+          {
+            Baton baton;
+            baton.post();
+            EXPECT_NO_THROW(async::await(async::baton_wait(baton)));
+          }
+          {
+            Baton baton;
+            start = std::chrono::steady_clock::now();
+            auto res = async::await(async::baton_try_wait_for(baton, kTimeout));
+            EXPECT_FALSE(res);
+            EXPECT_LE(start + kTimeout, std::chrono::steady_clock::now());
+          }
+          {
+            Baton baton;
+            start = std::chrono::steady_clock::now();
+            auto res = async::await(
+                async::baton_try_wait_until(baton, start + kTimeout));
+            EXPECT_FALSE(res);
+            EXPECT_LE(start + kTimeout, std::chrono::steady_clock::now());
+          }
         })
           .getVia(&evb));
 }

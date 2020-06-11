@@ -20,7 +20,7 @@ namespace folly {
 namespace fibers {
 
 bool Semaphore::signalSlow() {
-  Baton* waiter = nullptr;
+  Waiter* waiter = nullptr;
   {
     // If we signalled a release, notify the waitlist
     auto waitListLock = waitList_.wlock();
@@ -38,13 +38,13 @@ bool Semaphore::signalSlow() {
           testVal, testVal + 1, std::memory_order_relaxed));
       return true;
     }
-    waiter = waitList.front();
-    waitList.pop();
+    waiter = &waitList.front();
+    waitList.pop_front();
   }
   // Trigger waiter if there is one
   // Do it after releasing the waitList mutex, in case the waiter
   // eagerly calls signal
-  waiter->post();
+  waiter->baton.post();
   return true;
 }
 
@@ -64,7 +64,7 @@ void Semaphore::signal() {
       std::memory_order_acquire));
 }
 
-bool Semaphore::waitSlow(folly::fibers::Baton& waitBaton) {
+bool Semaphore::waitSlow(Waiter& waiter) {
   // Slow path, create a baton and acquire a mutex to update the wait list
   {
     auto waitListLock = waitList_.wlock();
@@ -75,9 +75,10 @@ bool Semaphore::waitSlow(folly::fibers::Baton& waitBaton) {
       return false;
     }
     // prepare baton and add to queue
-    waitList.push(&waitBaton);
+    waitList.push_back(waiter);
+    assert(!waitList.empty());
   }
-  // Signal to caller that we managed to push a baton
+  // Signal to caller that we managed to push a waiter
   return true;
 }
 
@@ -85,11 +86,11 @@ void Semaphore::wait() {
   auto oldVal = tokens_.load(std::memory_order_acquire);
   do {
     while (oldVal == 0) {
-      folly::fibers::Baton waitBaton;
+      Waiter waiter;
       // If waitSlow fails it is because the token is non-zero by the time
       // the lock is taken, so we can just continue round the loop
-      if (waitSlow(waitBaton)) {
-        waitBaton.wait();
+      if (waitSlow(waiter)) {
+        waiter.baton.wait();
         return;
       }
       oldVal = tokens_.load(std::memory_order_acquire);
@@ -101,11 +102,11 @@ void Semaphore::wait() {
       std::memory_order_acquire));
 }
 
-bool Semaphore::try_wait(Baton& waitBaton) {
+bool Semaphore::try_wait(Waiter& waiter) {
   auto oldVal = tokens_.load(std::memory_order_acquire);
   do {
     while (oldVal == 0) {
-      if (waitSlow(waitBaton)) {
+      if (waitSlow(waiter)) {
         return false;
       }
       oldVal = tokens_.load(std::memory_order_acquire);
@@ -124,11 +125,41 @@ coro::Task<void> Semaphore::co_wait() {
   auto oldVal = tokens_.load(std::memory_order_acquire);
   do {
     while (oldVal == 0) {
-      folly::fibers::Baton waitBaton;
+      Waiter waiter;
       // If waitSlow fails it is because the token is non-zero by the time
       // the lock is taken, so we can just continue round the loop
-      if (waitSlow(waitBaton)) {
-        co_await waitBaton;
+      if (waitSlow(waiter)) {
+        bool cancelled = false;
+        {
+          const auto& ct = co_await folly::coro::co_current_cancellation_token;
+          folly::CancellationCallback cb{
+              ct, [&] {
+                {
+                  auto waitListLock = waitList_.wlock();
+                  auto& waitList = *waitListLock;
+
+                  if (!waiter.hook_.is_linked()) {
+                    // Already dequeued by signalSlow()
+                    return;
+                  }
+
+                  cancelled = true;
+                  waitList.erase(waitList.iterator_to(waiter));
+                }
+
+                waiter.baton.post();
+              }};
+
+          co_await waiter.baton;
+        }
+
+        // Check 'cancelled' flag only after deregistering the callback so we're
+        // sure that we aren't reading it concurrently with a potential write
+        // from a thread requesting cancellation.
+        if (cancelled) {
+          co_yield folly::coro::co_error(folly::OperationCancelled{});
+        }
+
         co_return;
       }
       oldVal = tokens_.load(std::memory_order_acquire);
@@ -144,15 +175,36 @@ coro::Task<void> Semaphore::co_wait() {
 
 #if FOLLY_FUTURE_USING_FIBER
 
+namespace {
+
+class FutureWaiter final : public fibers::Baton::Waiter {
+ public:
+  FutureWaiter() {
+    semaphoreWaiter.baton.setWaiter(*this);
+  }
+
+  void post() override {
+    std::unique_ptr<FutureWaiter> destroyOnReturn{this};
+    promise.setValue();
+  }
+
+  Semaphore::Waiter semaphoreWaiter;
+  folly::Promise<Unit> promise;
+};
+
+} // namespace
+
 SemiFuture<Unit> Semaphore::future_wait() {
   auto oldVal = tokens_.load(std::memory_order_acquire);
   do {
     while (oldVal == 0) {
-      auto waitBaton = std::make_unique<fibers::Baton>();
+      auto batonWaiterPtr = std::make_unique<FutureWaiter>();
       // If waitSlow fails it is because the token is non-zero by the time
       // the lock is taken, so we can just continue round the loop
-      if (waitSlow(*waitBaton)) {
-        return futures::wait(std::move(waitBaton));
+      auto future = batonWaiterPtr->promise.getSemiFuture();
+      if (waitSlow(batonWaiterPtr->semaphoreWaiter)) {
+        (void)batonWaiterPtr.release();
+        return future;
       }
       oldVal = tokens_.load(std::memory_order_acquire);
     }

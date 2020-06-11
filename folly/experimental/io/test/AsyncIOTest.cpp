@@ -21,6 +21,8 @@ using folly::AsyncIO;
 
 namespace folly {
 namespace test {
+namespace async_base_test_lib_detail {
 INSTANTIATE_TYPED_TEST_CASE_P(AsyncTest, AsyncTest, AsyncIO);
+} // namespace async_base_test_lib_detail
 } // namespace test
 } // namespace folly

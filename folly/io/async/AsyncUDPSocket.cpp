@@ -58,11 +58,9 @@ AsyncUDPSocket::~AsyncUDPSocket() {
   }
 }
 
-void AsyncUDPSocket::bind(const folly::SocketAddress& address) {
-  NetworkSocket socket = netops::socket(
-      address.getFamily(),
-      SOCK_DGRAM,
-      address.getFamily() != AF_UNIX ? IPPROTO_UDP : 0);
+void AsyncUDPSocket::init(sa_family_t family) {
+  NetworkSocket socket =
+      netops::socket(family, SOCK_DGRAM, family != AF_UNIX ? IPPROTO_UDP : 0);
   if (socket == NetworkSocket()) {
     throw AsyncSocketException(
         AsyncSocketException::NOT_OPEN,
@@ -148,24 +146,13 @@ void AsyncUDPSocket::bind(const folly::SocketAddress& address) {
   }
 
   // If we're using IPv6, make sure we don't accept V4-mapped connections
-  if (address.getFamily() == AF_INET6) {
+  if (family == AF_INET6) {
     int flag = 1;
     if (netops::setsockopt(
             socket, IPPROTO_IPV6, IPV6_V6ONLY, &flag, sizeof(flag))) {
       throw AsyncSocketException(
           AsyncSocketException::NOT_OPEN, "Failed to set IPV6_V6ONLY", errno);
     }
-  }
-
-  // bind to the address
-  sockaddr_storage addrStorage;
-  address.getAddress(&addrStorage);
-  auto& saddr = reinterpret_cast<sockaddr&>(addrStorage);
-  if (netops::bind(socket, &saddr, address.getActualSize()) != 0) {
-    throw AsyncSocketException(
-        AsyncSocketException::NOT_OPEN,
-        "failed to bind the async udp socket for:" + address.describe(),
-        errno);
   }
 
   // success
@@ -175,10 +162,50 @@ void AsyncUDPSocket::bind(const folly::SocketAddress& address) {
 
   // attach to EventHandler
   EventHandler::changeHandlerFD(fd_);
+}
+
+void AsyncUDPSocket::bind(const folly::SocketAddress& address) {
+  init(address.getFamily());
+
+  // bind to the address
+  sockaddr_storage addrStorage;
+  address.getAddress(&addrStorage);
+  auto& saddr = reinterpret_cast<sockaddr&>(addrStorage);
+  if (netops::bind(fd_, &saddr, address.getActualSize()) != 0) {
+    throw AsyncSocketException(
+        AsyncSocketException::NOT_OPEN,
+        "failed to bind the async udp socket for:" + address.describe(),
+        errno);
+  }
 
   if (address.getFamily() == AF_UNIX || address.getPort() != 0) {
     localAddress_ = address;
   } else {
+    localAddress_.setFromLocalAddress(fd_);
+  }
+}
+
+void AsyncUDPSocket::connect(const folly::SocketAddress& address) {
+  // not bound yet
+  if (fd_ == NetworkSocket()) {
+    init(address.getFamily());
+  }
+
+  sockaddr_storage addrStorage;
+  address.getAddress(&addrStorage);
+  if (netops::connect(
+          fd_,
+          reinterpret_cast<sockaddr*>(&addrStorage),
+          address.getActualSize()) != 0) {
+    throw AsyncSocketException(
+        AsyncSocketException::NOT_OPEN,
+        "Failed to connect the udp socket to:" + address.describe(),
+        errno);
+  }
+  connected_ = true;
+  connectedAddress_ = address;
+
+  if (!localAddress_.isInitialized()) {
     localAddress_.setFromLocalAddress(fd_);
   }
 }
@@ -650,19 +677,6 @@ void AsyncUDPSocket::failErrMessageRead(const AsyncSocketException& ex) {
   }
 }
 
-int AsyncUDPSocket::connect(const folly::SocketAddress& address) {
-  CHECK_NE(NetworkSocket(), fd_) << "Socket not yet bound";
-  sockaddr_storage addrStorage;
-  address.getAddress(&addrStorage);
-  int ret = netops::connect(
-      fd_, reinterpret_cast<sockaddr*>(&addrStorage), address.getActualSize());
-  if (ret == 0) {
-    connected_ = true;
-    connectedAddress_ = address;
-  }
-  return ret;
-}
-
 void AsyncUDPSocket::handleRead() noexcept {
   void* buf{nullptr};
   size_t len{0};
@@ -679,98 +693,104 @@ void AsyncUDPSocket::handleRead() noexcept {
     return readCallback_->onNotifyDataAvailable(*this);
   }
 
-  readCallback_->getReadBuffer(&buf, &len);
-  if (buf == nullptr || len == 0) {
-    AsyncSocketException ex(
-        AsyncSocketException::BAD_ARGS,
-        "AsyncUDPSocket::getReadBuffer() returned empty buffer");
+  size_t numReads = maxReadsPerEvent_ ? maxReadsPerEvent_ : size_t(-1);
+  EventBase* originalEventBase = eventBase_;
+  while (numReads-- && readCallback_ && eventBase_ == originalEventBase) {
+    readCallback_->getReadBuffer(&buf, &len);
+    if (buf == nullptr || len == 0) {
+      AsyncSocketException ex(
+          AsyncSocketException::BAD_ARGS,
+          "AsyncUDPSocket::getReadBuffer() returned empty buffer");
 
-    auto cob = readCallback_;
-    readCallback_ = nullptr;
+      auto cob = readCallback_;
+      readCallback_ = nullptr;
 
-    cob->onReadError(ex);
-    updateRegistration();
-    return;
-  }
-
-  struct sockaddr_storage addrStorage;
-  socklen_t addrLen = sizeof(addrStorage);
-  memset(&addrStorage, 0, size_t(addrLen));
-  auto rawAddr = reinterpret_cast<sockaddr*>(&addrStorage);
-  rawAddr->sa_family = localAddress_.getFamily();
-
-  ssize_t bytesRead;
-  ReadCallback::OnDataAvailableParams params;
-
-#ifdef FOLLY_HAVE_MSG_ERRQUEUE
-  if (gro_.has_value() && (gro_.value() > 0)) {
-    char control[CMSG_SPACE(sizeof(uint16_t))] = {};
-    struct msghdr msg = {};
-    struct iovec iov = {};
-    struct cmsghdr* cmsg;
-    uint16_t* grosizeptr;
-
-    iov.iov_base = buf;
-    iov.iov_len = len;
-
-    msg.msg_iov = &iov;
-    msg.msg_iovlen = 1;
-
-    msg.msg_name = rawAddr;
-    msg.msg_namelen = addrLen;
-
-    msg.msg_control = control;
-    msg.msg_controllen = sizeof(control);
-
-    bytesRead = netops::recvmsg(fd_, &msg, MSG_TRUNC);
-
-    if (bytesRead >= 0) {
-      addrLen = msg.msg_namelen;
-      for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
-           cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-        if (cmsg->cmsg_level == SOL_UDP && cmsg->cmsg_type == UDP_GRO) {
-          grosizeptr = (uint16_t*)CMSG_DATA(cmsg);
-          params.gro_ = *grosizeptr;
-          break;
-        }
-      }
-    }
-  } else {
-    bytesRead = netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
-  }
-#else
-  bytesRead = netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
-#endif
-  if (bytesRead >= 0) {
-    clientAddress_.setFromSockaddr(rawAddr, addrLen);
-
-    if (bytesRead > 0) {
-      bool truncated = false;
-      if ((size_t)bytesRead > len) {
-        truncated = true;
-        bytesRead = ssize_t(len);
-      }
-
-      readCallback_->onDataAvailable(
-          clientAddress_, size_t(bytesRead), truncated, params);
-    }
-  } else {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      // No data could be read without blocking the socket
+      cob->onReadError(ex);
+      updateRegistration();
       return;
     }
 
-    AsyncSocketException ex(
-        AsyncSocketException::INTERNAL_ERROR, "::recvfrom() failed", errno);
+    struct sockaddr_storage addrStorage;
+    socklen_t addrLen = sizeof(addrStorage);
+    memset(&addrStorage, 0, size_t(addrLen));
+    auto rawAddr = reinterpret_cast<sockaddr*>(&addrStorage);
+    rawAddr->sa_family = localAddress_.getFamily();
 
-    // In case of UDP we can continue reading from the socket
-    // even if the current request fails. We notify the user
-    // so that he can do some logging/stats collection if he wants.
-    auto cob = readCallback_;
-    readCallback_ = nullptr;
+    ssize_t bytesRead;
+    ReadCallback::OnDataAvailableParams params;
 
-    cob->onReadError(ex);
-    updateRegistration();
+#ifdef FOLLY_HAVE_MSG_ERRQUEUE
+    if (gro_.has_value() && (gro_.value() > 0)) {
+      char control[CMSG_SPACE(sizeof(uint16_t))] = {};
+      struct msghdr msg = {};
+      struct iovec iov = {};
+      struct cmsghdr* cmsg;
+      uint16_t* grosizeptr;
+
+      iov.iov_base = buf;
+      iov.iov_len = len;
+
+      msg.msg_iov = &iov;
+      msg.msg_iovlen = 1;
+
+      msg.msg_name = rawAddr;
+      msg.msg_namelen = addrLen;
+
+      msg.msg_control = control;
+      msg.msg_controllen = sizeof(control);
+
+      bytesRead = netops::recvmsg(fd_, &msg, MSG_TRUNC);
+
+      if (bytesRead >= 0) {
+        addrLen = msg.msg_namelen;
+        for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
+             cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+          if (cmsg->cmsg_level == SOL_UDP && cmsg->cmsg_type == UDP_GRO) {
+            grosizeptr = (uint16_t*)CMSG_DATA(cmsg);
+            params.gro_ = *grosizeptr;
+            break;
+          }
+        }
+      }
+    } else {
+      bytesRead = netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
+    }
+#else
+    bytesRead = netops::recvfrom(fd_, buf, len, MSG_TRUNC, rawAddr, &addrLen);
+#endif
+    if (bytesRead >= 0) {
+      clientAddress_.setFromSockaddr(rawAddr, addrLen);
+
+      if (bytesRead > 0) {
+        bool truncated = false;
+        if ((size_t)bytesRead > len) {
+          truncated = true;
+          bytesRead = ssize_t(len);
+        }
+
+        readCallback_->onDataAvailable(
+            clientAddress_, size_t(bytesRead), truncated, params);
+      }
+    } else {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        // No data could be read without blocking the socket
+        return;
+      }
+
+      AsyncSocketException ex(
+          AsyncSocketException::INTERNAL_ERROR, "::recvfrom() failed", errno);
+
+      // In case of UDP we can continue reading from the socket
+      // even if the current request fails. We notify the user
+      // so that he can do some logging/stats collection if he wants.
+      auto cob = readCallback_;
+      readCallback_ = nullptr;
+
+      cob->onReadError(ex);
+      updateRegistration();
+
+      return;
+    }
   }
 }
 

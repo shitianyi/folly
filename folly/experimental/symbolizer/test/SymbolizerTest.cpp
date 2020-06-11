@@ -25,6 +25,7 @@
 #include <folly/experimental/symbolizer/SymbolizedFrame.h>
 #include <folly/experimental/symbolizer/test/SymbolizerTestUtils.h>
 #include <folly/portability/GTest.h>
+#include <folly/test/TestUtils.h>
 
 namespace folly {
 namespace symbolizer {
@@ -33,6 +34,8 @@ namespace test {
 void foo() {}
 
 TEST(Symbolizer, Single) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   // It looks like we could only use .debug_aranges with "-g2", with
   // "-g1 -gdwarf-aranges", the code has to fallback to line-tables to
   // get the file name.
@@ -70,6 +73,8 @@ class ElfCacheTest : public testing::Test {
 FrameArray<100> goldenFrames;
 
 void ElfCacheTest::SetUp() {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   bar(goldenFrames);
   Symbolizer symbolizer;
   symbolizer.symbolize(goldenFrames);
@@ -89,10 +94,9 @@ void runElfCacheTest(Symbolizer& symbolizer) {
   }
 }
 
-TEST_F(ElfCacheTest, TinyElfCache) {
-  ElfCache cache(1);
+TEST_F(ElfCacheTest, ElfCache) {
+  ElfCache cache;
   Symbolizer symbolizer(&cache);
-  // Run twice, in case the wrong stuff gets evicted?
   for (size_t i = 0; i < 2; ++i) {
     runElfCacheTest(symbolizer);
   }
@@ -107,6 +111,8 @@ TEST_F(ElfCacheTest, SignalSafeElfCache) {
 }
 
 TEST(SymbolizerTest, SymbolCache) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL, 100);
 
   FrameArray<100> frames;
@@ -134,6 +140,7 @@ FOLLY_NOINLINE void lexicalBlockBar(FrameArray<kNumFrames>& frames) try {
 }
 
 void verifyStackTrace(
+    Symbolizer& symbolizer,
     const FrameArray<100>& frames,
     const std::string& barName,
     size_t barLine,
@@ -149,6 +156,12 @@ void verifyStackTrace(
   EXPECT_EQ(barName, std::string(folly::demangle(frames.frames[6].name)));
   EXPECT_EQ(barFile, std::string(frames.frames[6].location.file.toString()));
   EXPECT_EQ(barLine, frames.frames[6].location.line);
+
+  FrameArray<10> singleAddressFrames;
+  singleAddressFrames.frameCount = 1;
+  singleAddressFrames.addresses[0] = frames.frames[7].addr;
+  // Two inline function calls are added into frames.
+  EXPECT_EQ(3, symbolizer.symbolize(singleAddressFrames));
 }
 
 template <size_t kNumFrames = 100>
@@ -184,6 +197,8 @@ class ClassWithInlineFunctions {
 };
 
 TEST(SymbolizerTest, InlineFunctionBasic) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -208,6 +223,7 @@ TEST(SymbolizerTest, InlineFunctionBasic) {
   //  Frame: _ZN7testing8internal12UnitTestImpl11RunAllTestsEv
   // clang-format on
   verifyStackTrace(
+      symbolizer,
       frames,
       "void folly::symbolizer::test::inlineBar<100ul>("
       "folly::symbolizer::FrameArray<100ul>&)",
@@ -222,6 +238,8 @@ TEST(SymbolizerTest, InlineFunctionBasic) {
 }
 
 TEST(SymbolizerTest, InlineFunctionWithoutEnoughFrames) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -254,6 +272,8 @@ TEST(SymbolizerTest, InlineFunctionWithoutEnoughFrames) {
 }
 
 TEST(SymbolizerTest, InlineFunctionInLexicalBlock) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -261,6 +281,7 @@ TEST(SymbolizerTest, InlineFunctionInLexicalBlock) {
   symbolizer.symbolize(frames);
 
   verifyStackTrace(
+      symbolizer,
       frames,
       "void folly::symbolizer::test::inlineBar<100ul>("
       "folly::symbolizer::FrameArray<100ul>&)",
@@ -278,6 +299,8 @@ TEST(SymbolizerTest, InlineFunctionInLexicalBlock) {
 }
 
 TEST(SymbolizerTest, InlineFunctionInDifferentCompilationUnit) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -296,6 +319,8 @@ TEST(SymbolizerTest, InlineFunctionInDifferentCompilationUnit) {
 }
 
 TEST(SymbolizerTest, InlineClassMemberFunction) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -304,6 +329,7 @@ TEST(SymbolizerTest, InlineClassMemberFunction) {
   symbolizer.symbolize(frames);
 
   verifyStackTrace(
+      symbolizer,
       frames,
       "folly::symbolizer::test::ClassWithInlineFunctions::inlineBar("
       "folly::symbolizer::FrameArray<100ul>&) const",
@@ -312,6 +338,8 @@ TEST(SymbolizerTest, InlineClassMemberFunction) {
 }
 
 TEST(SymbolizerTest, StaticInlineClassMemberFunction) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -319,6 +347,7 @@ TEST(SymbolizerTest, StaticInlineClassMemberFunction) {
   symbolizer.symbolize(frames);
 
   verifyStackTrace(
+      symbolizer,
       frames,
       "folly::symbolizer::test::ClassWithInlineFunctions::staticInlineBar("
       "folly::symbolizer::FrameArray<100ul>&)",
@@ -327,6 +356,8 @@ TEST(SymbolizerTest, StaticInlineClassMemberFunction) {
 }
 
 TEST(SymbolizerTest, InlineClassMemberFunctionInDifferentFile) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -335,6 +366,7 @@ TEST(SymbolizerTest, InlineClassMemberFunctionInDifferentFile) {
   symbolizer.symbolize(frames);
 
   verifyStackTrace(
+      symbolizer,
       frames,
       "folly::symbolizer::test::InlineFunctionsWrapper::inlineBar("
       "folly::symbolizer::FrameArray<100ul>&) const",
@@ -343,6 +375,8 @@ TEST(SymbolizerTest, InlineClassMemberFunctionInDifferentFile) {
 }
 
 TEST(SymbolizerTest, StaticInlineClassMemberFunctionInDifferentFile) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 0);
 
   FrameArray<100> frames;
@@ -350,6 +384,7 @@ TEST(SymbolizerTest, StaticInlineClassMemberFunctionInDifferentFile) {
   symbolizer.symbolize(frames);
 
   verifyStackTrace(
+      symbolizer,
       frames,
       "folly::symbolizer::test::InlineFunctionsWrapper::staticInlineBar("
       "folly::symbolizer::FrameArray<100ul>&)",
@@ -359,6 +394,8 @@ TEST(SymbolizerTest, StaticInlineClassMemberFunctionInDifferentFile) {
 
 // No inline frames should be filled because of no extra frames.
 TEST(SymbolizerTest, InlineFunctionBasicNoExtraFrames) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 100);
   FrameArray<8> frames;
   inlineBar<8>(frames);
@@ -373,6 +410,8 @@ TEST(SymbolizerTest, InlineFunctionBasicNoExtraFrames) {
 }
 
 TEST(SymbolizerTest, InlineFunctionWithCache) {
+  SKIP_IF(!Symbolizer::isAvailable());
+
   Symbolizer symbolizer(nullptr, LocationInfoMode::FULL_WITH_INLINE, 100);
 
   FrameArray<100> frames;
@@ -380,6 +419,7 @@ TEST(SymbolizerTest, InlineFunctionWithCache) {
   symbolizer.symbolize(frames);
 
   verifyStackTrace(
+      symbolizer,
       frames,
       "void folly::symbolizer::test::inlineBar<100ul>("
       "folly::symbolizer::FrameArray<100ul>&)",

@@ -34,10 +34,10 @@
 #include <folly/Memory.h>
 #include <folly/ScopeGuard.h>
 #include <folly/String.h>
-
 #include <folly/experimental/symbolizer/Dwarf.h>
 #include <folly/experimental/symbolizer/Elf.h>
 #include <folly/experimental/symbolizer/LineReader.h>
+#include <folly/lang/SafeAssert.h>
 #include <folly/portability/SysMman.h>
 #include <folly/portability/Unistd.h>
 
@@ -47,7 +47,7 @@
  *
  * Note that declaring it with `extern "C"` results in linkage conflicts.
  */
-extern struct r_debug _r_debug;
+FOLLY_ATTR_WEAK extern struct r_debug _r_debug;
 
 namespace folly {
 namespace symbolizer {
@@ -55,8 +55,7 @@ namespace symbolizer {
 namespace {
 
 ElfCache* defaultElfCache() {
-  static constexpr size_t defaultCapacity = 500;
-  static auto cache = new ElfCache(defaultCapacity);
+  static auto cache = new ElfCache();
   return cache;
 }
 
@@ -84,6 +83,10 @@ void setSymbolizedFrame(
 
 } // namespace
 
+bool Symbolizer::isAvailable() {
+  return &_r_debug != nullptr;
+}
+
 Symbolizer::Symbolizer(
     ElfCacheBase* cache,
     LocationInfoMode mode,
@@ -94,33 +97,26 @@ Symbolizer::Symbolizer(
   }
 }
 
-void Symbolizer::symbolize(
+size_t Symbolizer::symbolize(
     folly::Range<const uintptr_t*> addrs,
     folly::Range<SymbolizedFrame*> frames) {
   size_t addrCount = addrs.size();
   size_t frameCount = frames.size();
-  size_t remaining = 0;
-  for (size_t i = 0; i < addrCount; ++i) {
-    auto& frame = frames[i];
-    if (!frame.found) {
-      ++remaining;
-      frame.clear();
-    }
-  }
+  FOLLY_SAFE_CHECK(addrCount <= frameCount, "Not enough frames.");
+  size_t remaining = addrCount;
 
-  if (remaining == 0) { // we're done
-    return;
+  if (&_r_debug == nullptr) {
+    return 0;
   }
-
   if (_r_debug.r_version != 1) {
-    return;
+    return 0;
   }
 
   char selfPath[PATH_MAX + 8];
   ssize_t selfSize;
   if ((selfSize = readlink("/proc/self/exe", selfPath, PATH_MAX + 1)) == -1) {
     // Something has gone terribly wrong.
-    return;
+    return 0;
   }
   selfPath[selfSize] = '\0';
 
@@ -230,6 +226,8 @@ void Symbolizer::symbolize(
       }
     }
   }
+
+  return addrCount;
 }
 
 namespace {
@@ -520,17 +518,9 @@ void SafeStackTracePrinter::printStackTrace(bool symbolize) {
 
 FastStackTracePrinter::FastStackTracePrinter(
     std::unique_ptr<SymbolizePrinter> printer,
-    size_t elfCacheSize,
     size_t symbolCacheSize)
-    : elfCache_(
-          elfCacheSize == 0
-              ? nullptr
-              : new ElfCache{std::max(countLoadedElfFiles(), elfCacheSize)}),
-      printer_(std::move(printer)),
-      symbolizer_(
-          elfCache_ ? elfCache_.get() : defaultElfCache(),
-          LocationInfoMode::FULL,
-          symbolCacheSize) {}
+    : printer_(std::move(printer)),
+      symbolizer_(defaultElfCache(), LocationInfoMode::FULL, symbolCacheSize) {}
 
 FastStackTracePrinter::~FastStackTracePrinter() = default;
 

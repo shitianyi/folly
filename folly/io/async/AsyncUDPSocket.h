@@ -147,6 +147,27 @@ class AsyncUDPSocket : public EventHandler {
   virtual void bind(const folly::SocketAddress& address);
 
   /**
+   * Connects the UDP socket to a remote destination address provided in
+   * address. This can speed up UDP writes on linux because it will cache flow
+   * state on connects.
+   * Using connect has many quirks, and you should be aware of them before using
+   * this API:
+   * 1. If this is called before bind, the socket will be automatically bound to
+   * the IP address of the current default network interface.
+   * 2. Normally UDP can use the 2 tuple (src ip, src port) to steer packets
+   * sent by the peer to the socket, however after connecting the socket, only
+   * packets destined to the destination address specified in connect() will be
+   * forwarded and others will be dropped. If the server can send a packet
+   * from a different destination port / IP then you probably do not want to use
+   * this API.
+   * 3. It can be called repeatedly on either the client or server however it's
+   * normally only useful on the client and not server.
+   *
+   * Returns the result of calling the connect syscall.
+   */
+  virtual void connect(const folly::SocketAddress& address);
+
+  /**
    * Use an already bound file descriptor. You can either transfer ownership
    * of this FD by using ownership = FDOwnership::OWNS or share it using
    * FDOwnership::SHARED. In case FD is shared, it will not be `close`d in
@@ -314,32 +335,36 @@ class AsyncUDPSocket : public EventHandler {
    */
   virtual void setErrMessageCallback(ErrMessageCallback* errMessageCallback);
 
-  /**
-   * Connects the UDP socket to a remote destination address provided in
-   * address. This can speed up UDP writes on linux because it will cache flow
-   * state on connects.
-   * Using connect has many quirks, and you should be aware of them before using
-   * this API:
-   * 1. This must only be called after binding the socket.
-   * 2. Normally UDP can use the 2 tuple (src ip, src port) to steer packets
-   * sent by the peer to the socket, however after connecting the socket, only
-   * packets destined to the destination address specified in connect() will be
-   * forwarded and others will be dropped. If the server can send a packet
-   * from a different destination port / IP then you probably do not want to use
-   * this API.
-   * 3. It can be called repeatedly on either the client or server however it's
-   * normally only useful on the client and not server.
-   *
-   * Returns the result of calling the connect syscall.
-   */
-  virtual int connect(const folly::SocketAddress& address);
-
   virtual bool isBound() const {
     return fd_ != NetworkSocket();
   }
 
   virtual bool isReading() const {
     return readCallback_ != nullptr;
+  }
+
+  /**
+   * Set the maximum number of reads to execute from the underlying
+   * socket each time the EventBase detects that new ingress data is
+   * available. The default is kMaxReadsPerEvent
+   *
+   * @param maxReads  Maximum number of reads per data-available event;
+   *                  a value of zero means unlimited.
+   */
+  void setMaxReadsPerEvent(uint16_t maxReads) {
+    maxReadsPerEvent_ = maxReads;
+  }
+
+  /**
+   * Get the maximum number of reads this object will execute from
+   * the underlying socket each time the EventBase detects that new
+   * ingress data is available.
+   *
+   * @returns Maximum number of reads per data-available event; a value
+   *          of zero means unlimited.
+   */
+  uint16_t getMaxReadsPerEvent() const {
+    return maxReadsPerEvent_;
   }
 
   virtual void detachEventBase();
@@ -405,12 +430,18 @@ class AsyncUDPSocket : public EventHandler {
 
   void failErrMessageRead(const AsyncSocketException& ex);
 
+  static auto constexpr kDefaultReadsPerEvent = 1;
+  uint16_t maxReadsPerEvent_{
+      kDefaultReadsPerEvent}; ///< Max reads per event loop iteration
+
   // Non-null only when we are reading
   ReadCallback* readCallback_;
 
  private:
   AsyncUDPSocket(const AsyncUDPSocket&) = delete;
   AsyncUDPSocket& operator=(const AsyncUDPSocket&) = delete;
+
+  void init(sa_family_t family);
 
   // EventHandler
   void handlerReady(uint16_t events) noexcept override;

@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <boost/variant.hpp>
 #include <iomanip>
 
 #include <folly/Optional.h>
@@ -37,16 +36,11 @@
 #include <folly/portability/Sockets.h>
 #include <folly/ssl/OpenSSLPtrTypes.h>
 #include <folly/ssl/SSLSession.h>
+#include <folly/ssl/SSLSessionManager.h>
 
 namespace folly {
 
 class AsyncSSLSocketConnector;
-
-namespace ssl {
-namespace detail {
-class OpenSSLSession;
-} // namespace detail
-} // namespace ssl
 
 /**
  * A class for performing asynchronous I/O on an SSL connection.
@@ -78,7 +72,7 @@ class OpenSSLSession;
  * want to give up if the remote end stops responding and no further
  * progress can be made sending the data.
  */
-class AsyncSSLSocket : public virtual AsyncSocket {
+class AsyncSSLSocket : public AsyncSocket {
  public:
   typedef std::unique_ptr<AsyncSSLSocket, Destructor> UniquePtr;
   using X509_deleter = folly::static_function_deleter<X509, &X509_free>;
@@ -326,7 +320,7 @@ class AsyncSSLSocket : public virtual AsyncSocket {
    * the flag should be reset.
    */
 
-  // Inherit AsyncTransportWrapper methods from AsyncSocket except the
+  // Inherit AsyncTransport methods from AsyncSocket except the
   // following.
   // See the documentation in AsyncTransport.h
   // TODO: implement graceful shutdown in close()
@@ -914,10 +908,6 @@ class AsyncSSLSocket : public virtual AsyncSocket {
 
   static void sslInfoCallback(const SSL* ssl, int where, int ret);
 
-  folly::ssl::SSLSessionUniquePtr getRawSSLSession() const;
-  std::shared_ptr<folly::ssl::detail::OpenSSLSession> getAbstractSSLSession()
-      const;
-
   // Whether the current write to the socket should use MSG_MORE.
   bool corkCurrentWrite_{false};
   // SSL related members.
@@ -933,13 +923,6 @@ class AsyncSSLSocket : public virtual AsyncSocket {
   // Callback for SSL_accept() or SSL_connect()
   HandshakeCB* handshakeCallback_{nullptr};
   ssl::SSLUniquePtr ssl_;
-  // The SSL session. Which type the variant contains depends on the
-  // session API that is used. Is only intended to temporarily be a variant.
-  // Will be converted to a non-variant once SSL session APIs are merged.
-  boost::variant<
-      folly::ssl::SSLSessionUniquePtr,
-      std::shared_ptr<folly::ssl::detail::OpenSSLSession>>
-      sslSession_;
   Timeout handshakeTimeout_;
   Timeout connectionTimeout_;
 
@@ -1004,6 +987,8 @@ class AsyncSSLSocket : public virtual AsyncSocket {
   std::unique_ptr<ReadCallback> asyncOperationFinishCallback_;
   // Whether this socket is currently waiting on SSL_accept
   bool waitingOnAccept_{false};
+  // Manages the session for the socket
+  folly::ssl::SSLSessionManager sslSessionManager_;
 };
 
 } // namespace folly
