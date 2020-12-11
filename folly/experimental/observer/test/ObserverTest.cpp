@@ -18,6 +18,7 @@
 
 #include <folly/Singleton.h>
 #include <folly/experimental/observer/SimpleObservable.h>
+#include <folly/experimental/observer/WithJitter.h>
 #include <folly/portability/GTest.h>
 #include <folly/synchronization/Baton.h>
 
@@ -282,6 +283,33 @@ TEST(Observer, TLObserver) {
   EXPECT_EQ(41, ***k);
 }
 
+TEST(ReadMostlyTLObserver, ReadMostlyTLObserver) {
+  auto createReadMostlyTLObserver = [](int value) {
+    return folly::observer::makeReadMostlyTLObserver([=] { return value; });
+  };
+
+  auto k = std::make_unique<folly::observer::ReadMostlyTLObserver<int>>(
+      createReadMostlyTLObserver(42));
+  EXPECT_EQ(42, *k->getShared());
+  k = std::make_unique<folly::observer::ReadMostlyTLObserver<int>>(
+      createReadMostlyTLObserver(41));
+  EXPECT_EQ(41, *k->getShared());
+}
+
+TEST(ReadMostlyTLObserver, Update) {
+  SimpleObservable<int> observable(42);
+  auto observer = observable.getObserver();
+
+  ReadMostlyTLObserver readMostlyObserver(observer);
+  EXPECT_EQ(*readMostlyObserver.getShared(), 42);
+
+  observable.setValue(24);
+
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+
+  EXPECT_EQ(*readMostlyObserver.getShared(), 24);
+}
+
 TEST(Observer, SubscribeCallback) {
   static auto mainThreadId = std::this_thread::get_id();
   static std::function<void()> updatesCob;
@@ -290,9 +318,7 @@ TEST(Observer, SubscribeCallback) {
   static std::atomic<size_t> getCallsFinish{0};
 
   struct Observable {
-    ~Observable() {
-      EXPECT_EQ(mainThreadId, std::this_thread::get_id());
-    }
+    ~Observable() { EXPECT_EQ(mainThreadId, std::this_thread::get_id()); }
   };
   struct Traits {
     using element_type = int;
@@ -535,4 +561,187 @@ TEST(Observer, MakeValueObserver) {
   EXPECT_EQ(observedIds, std::vector<int>({1, 2, 3, 4, 5}));
   EXPECT_EQ(observedValues, std::vector<int>({1, 2, 3}));
   EXPECT_EQ(observedValues2, std::vector<int>({1, 2, 3}));
+}
+
+TEST(Observer, MakeStaticObserver) {
+  auto explicitStringObserver = makeStaticObserver<std::string>("hello");
+  EXPECT_EQ(**explicitStringObserver, "hello");
+
+  auto implicitIntObserver = makeStaticObserver(5);
+  EXPECT_EQ(**implicitIntObserver, 5);
+
+  auto explicitSharedPtrObserver =
+      makeStaticObserver<std::shared_ptr<int>>(std::make_shared<int>(5));
+  EXPECT_EQ(***explicitSharedPtrObserver, 5);
+
+  auto implicitSharedPtrObserver = makeStaticObserver(std::make_shared<int>(5));
+  EXPECT_EQ(**implicitSharedPtrObserver, 5);
+}
+
+TEST(Observer, AtomicObserver) {
+  SimpleObservable<int> observable{42};
+  SimpleObservable<int> observable2{12};
+
+  AtomicObserver<int> observer{observable.getObserver()};
+  AtomicObserver<int> observerCopy{observer};
+
+  EXPECT_EQ(*observer, 42);
+  EXPECT_EQ(*observerCopy, 42);
+  observable.setValue(24);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(*observer, 24);
+  EXPECT_EQ(*observerCopy, 24);
+
+  observer = observable2.getObserver();
+  EXPECT_EQ(*observer, 12);
+  EXPECT_EQ(*observerCopy, 24);
+  observable2.setValue(15);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(*observer, 15);
+  EXPECT_EQ(*observerCopy, 24);
+
+  observerCopy = observer;
+  EXPECT_EQ(*observerCopy, 15);
+
+  auto dependentObserver =
+      makeAtomicObserver([o = observer] { return *o + 1; });
+  EXPECT_EQ(*dependentObserver, 16);
+  observable2.setValue(20);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(*dependentObserver, 21);
+}
+
+TEST(Observer, Unwrap) {
+  SimpleObservable<bool> selectorObservable{true};
+  SimpleObservable<int> trueObservable{1};
+  SimpleObservable<int> falseObservable{2};
+
+  auto observer = makeObserver([selectorO = selectorObservable.getObserver(),
+                                trueO = trueObservable.getObserver(),
+                                falseO = falseObservable.getObserver()] {
+    if (**selectorO) {
+      return trueO;
+    }
+    return falseO;
+  });
+
+  EXPECT_EQ(**observer, 1);
+
+  selectorObservable.setValue(false);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+
+  EXPECT_EQ(**observer, 2);
+
+  falseObservable.setValue(3);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+
+  EXPECT_EQ(**observer, 3);
+
+  trueObservable.setValue(4);
+  selectorObservable.setValue(true);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+  EXPECT_EQ(**observer, 4);
+}
+
+TEST(Observer, UnwrapSimpleObservable) {
+  SimpleObservable<int> a{1};
+  SimpleObservable<int> b{2};
+  SimpleObservable<Observer<int>> observable{a.getObserver()};
+  auto o = observable.getObserver();
+
+  EXPECT_EQ(1, **o);
+
+  a.setValue(3);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+
+  EXPECT_EQ(3, **o);
+
+  observable.setValue(b.getObserver());
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+
+  EXPECT_EQ(2, **o);
+
+  b.setValue(4);
+  folly::observer_detail::ObserverManager::waitForAllUpdates();
+
+  EXPECT_EQ(4, **o);
+}
+
+TEST(Observer, WithJitterMonotoneProgress) {
+  SimpleObservable<int> observable(0);
+  auto observer = observable.getObserver();
+  EXPECT_EQ(0, **observer);
+
+  auto laggingObserver = withJitter(
+      std::move(observer),
+      std::chrono::milliseconds{100},
+      std::chrono::milliseconds{100});
+  EXPECT_EQ(0, **laggingObserver);
+
+  // Updates should never propagate out of order. E.g., if update 1 arrives and
+  // is delayed by 100 milliseconds, followed immediately by the arrival of
+  // update 2 with 1 millisecond delay, then update 1 should never overwrite
+  // update 2.
+  for (int i = 1, lastSeen = 0; i <= 50; ++i) {
+    auto curr = **laggingObserver;
+    EXPECT_LE(lastSeen, curr);
+    lastSeen = curr;
+    observable.setValue(i);
+    /* sleep override */ std::this_thread::sleep_for(
+        std::chrono::milliseconds{10});
+  }
+
+  /* sleep override */ std::this_thread::sleep_for(std::chrono::seconds{2});
+  // The latest update is eventually propagated
+  EXPECT_EQ(50, **laggingObserver);
+}
+
+TEST(Observer, WithJitterActuallyInducesLag) {
+  SimpleObservable<int> observable(0);
+  auto observer = observable.getObserver();
+  EXPECT_EQ(0, **observer);
+
+  auto laggingObserver = withJitter(
+      observer, std::chrono::seconds{10}, std::chrono::milliseconds::zero());
+  EXPECT_EQ(0, **laggingObserver);
+
+  observable.setValue(42);
+  /* sleep override */ std::this_thread::sleep_for(std::chrono::seconds{1});
+  EXPECT_EQ(0, **laggingObserver);
+}
+
+TEST(Observer, WithJitterNoEarlyRefresh) {
+  SimpleObservable<int> observable(0);
+  auto base = observable.getObserver();
+  auto copy = makeObserver([base] { return **base; });
+  auto laggingObserver = withJitter(
+      base, std::chrono::seconds{10}, std::chrono::milliseconds::zero());
+  auto delta = makeObserver(
+      [copy, laggingObserver] { return **copy - **laggingObserver; });
+
+  EXPECT_EQ(0, **base);
+  EXPECT_EQ(0, **copy);
+  EXPECT_EQ(0, **laggingObserver);
+  EXPECT_EQ(0, **delta);
+
+  observable.setValue(42);
+  /* sleep override */ std::this_thread::sleep_for(std::chrono::seconds{1});
+
+  // Updates along the base -> copy -> delta path should not trigger an early
+  // refresh of laggingObserver
+  EXPECT_EQ(42, **base);
+  EXPECT_EQ(42, **copy);
+  EXPECT_EQ(0, **laggingObserver);
+  EXPECT_EQ(42, **delta);
+}
+
+TEST(SimpleObservable, DefaultConstructible) {
+  struct Data {
+    int i = 42;
+  };
+  static_assert(std::is_default_constructible<Data>::value);
+  static_assert(std::is_default_constructible<SimpleObservable<Data>>::value);
+
+  SimpleObservable<Data> observable;
+  EXPECT_EQ((**observable.getObserver()).i, 42);
 }

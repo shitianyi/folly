@@ -29,30 +29,18 @@ struct from_any {
 };
 
 struct Fn {
-  char operator()(int, int) noexcept {
-    return 'a';
-  }
-  int volatile&& operator()(int, char const*) {
-    return std::move(x_);
-  }
-  float operator()(float, float) {
-    return 3.14;
-  }
+  char operator()(int, int) noexcept { return 'a'; }
+  int volatile&& operator()(int, char const*) { return std::move(x_); }
+  float operator()(float, float) { return 3.14; }
   int volatile x_ = 17;
 };
 
 FOLLY_CREATE_MEMBER_INVOKER(test_invoker, test);
 
 struct Obj {
-  char test(int, int) noexcept {
-    return 'a';
-  }
-  int volatile&& test(int, char const*) {
-    return std::move(x_);
-  }
-  float test(float, float) {
-    return 3.14;
-  }
+  char test(int, int) noexcept { return 'a'; }
+  int volatile&& test(int, char const*) { return std::move(x_); }
+  float test(float, float) { return 3.14; }
   int volatile x_ = 17;
 };
 
@@ -283,16 +271,12 @@ FOLLY_CREATE_STATIC_MEMBER_INVOKER(stat_invoker, stat);
 
 TEST_F(InvokeTest, static_member_invoke) {
   struct HasStat {
-    static char stat(int, int) noexcept {
-      return 'a';
-    }
+    static char stat(int, int) noexcept { return 'a'; }
     static int volatile&& stat(int, char const*) {
       static int volatile x_ = 17;
       return std::move(x_);
     }
-    static float stat(float, float) {
-      return 3.14;
-    }
+    static float stat(float, float) { return 3.14; }
   };
   using traits = folly::invoke_traits<stat_invoker<HasStat>>;
 
@@ -312,4 +296,60 @@ TEST_F(InvokeTest, static_member_invoke) {
   EXPECT_TRUE((traits::is_nothrow_invocable_r_v<int, int, char>));
   EXPECT_FALSE((traits::is_nothrow_invocable_r_v<int, int, char*>));
   EXPECT_FALSE((traits::is_nothrow_invocable_r_v<int, int>));
+}
+
+namespace {
+
+struct TestCustomisationPointFn {
+  template <typename T, typename U>
+  constexpr auto operator()(T&& t, U&& u) const noexcept(
+      folly::is_nothrow_tag_invocable_v<TestCustomisationPointFn, T, U>)
+      -> folly::tag_invoke_result_t<TestCustomisationPointFn, T, U> {
+    return folly::tag_invoke(*this, static_cast<T&&>(t), static_cast<U&&>(u));
+  }
+};
+
+FOLLY_DEFINE_CPO(TestCustomisationPointFn, testCustomisationPoint)
+
+struct TypeA {
+  constexpr friend int
+  tag_invoke(folly::cpo_t<testCustomisationPoint>, const TypeA&, int value) {
+    return value * 2;
+  }
+  constexpr friend bool tag_invoke(
+      folly::cpo_t<testCustomisationPoint>,
+      const TypeA&,
+      bool value) noexcept {
+    return !value;
+  }
+};
+
+} // namespace
+
+static_assert(
+    folly::is_invocable<decltype(testCustomisationPoint), TypeA, int>::value);
+static_assert(
+    !folly::is_invocable<decltype(testCustomisationPoint), TypeA, TypeA>::
+        value);
+static_assert(
+    folly::is_nothrow_invocable<decltype(testCustomisationPoint), TypeA, bool>::
+        value);
+static_assert(
+    !folly::is_nothrow_invocable<decltype(testCustomisationPoint), TypeA, int>::
+        value);
+static_assert(
+    std::is_same<
+        folly::invoke_result_t<decltype(testCustomisationPoint), TypeA, int>,
+        int>::value);
+
+// Test that the CPO forwards through constexpr-ness of the
+// customisations by evaluating the CPO in a static_assert()
+// which forces compile-time evaluation.
+static_assert(testCustomisationPoint(TypeA{}, 10) == 20);
+static_assert(!testCustomisationPoint(TypeA{}, true));
+
+TEST_F(InvokeTest, TagInvokeCustomisationPoint) {
+  const TypeA a;
+  EXPECT_EQ(10, testCustomisationPoint(a, 5));
+  EXPECT_EQ(false, testCustomisationPoint(a, true));
 }

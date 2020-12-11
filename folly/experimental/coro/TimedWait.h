@@ -65,7 +65,7 @@ timed_wait(Awaitable awaitable, Duration duration) {
   if (!result.hasValue() && !result.hasException()) {
     co_return folly::none;
   }
-  co_return *result;
+  co_return std::move(*result);
 }
 
 } // namespace coro

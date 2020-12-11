@@ -52,13 +52,9 @@ namespace observer_detail {
  */
 class ObserverManager {
  public:
-  static size_t getVersion() {
-    return getInstance().version_;
-  }
+  static size_t getVersion() { return getInstance().version_; }
 
-  static bool inManagerThread() {
-    return inManagerThread_;
-  }
+  static bool inManagerThread() { return inManagerThread_; }
 
   static void scheduleRefresh(Core::Ptr core, size_t minVersion) {
     if (core->getVersion() >= minVersion) {
@@ -75,27 +71,8 @@ class ObserverManager {
 
     SharedMutexReadPriority::ReadHolder rh(instance.versionMutex_);
 
-    // TSAN assumes that the thread that locks the mutex must
-    // be the one that unlocks it. However, we are passing ownership of
-    // the read lock into the lambda, and the thread that performs the async
-    // work will be the one that unlocks it. To avoid noise with TSAN,
-    // annotate that the thread has released the mutex, and then annotate
-    // the async thread as acquiring the mutex.
-    annotate_rwlock_released(
-        &instance.versionMutex_,
-        annotate_rwlock_level::rdlock,
-        __FILE__,
-        __LINE__);
-
     updatesManager->scheduleCurrent(
         [core = std::move(core), &instance, rh = std::move(rh)]() {
-          // Make TSAN know that the current thread owns the read lock now.
-          annotate_rwlock_acquired(
-              &instance.versionMutex_,
-              annotate_rwlock_level::rdlock,
-              __FILE__,
-              __LINE__);
-
           core->refresh(instance.version_);
         });
   }
@@ -116,9 +93,7 @@ class ObserverManager {
     auto& instance = getInstance();
 
     auto inManagerThread = std::exchange(inManagerThread_, true);
-    SCOPE_EXIT {
-      inManagerThread_ = inManagerThread;
-    };
+    SCOPE_EXIT { inManagerThread_ = inManagerThread; };
 
     SharedMutexReadPriority::ReadHolder rh(instance.versionMutex_);
 
@@ -144,9 +119,7 @@ class ObserverManager {
       currentDependencies_ = &dependencies_;
     }
 
-    static bool isActive() {
-      return currentDependencies_;
-    }
+    static bool isActive() { return currentDependencies_; }
 
     static void markDependency(Core::Ptr dependency) {
       DCHECK(inManagerThread());
@@ -197,7 +170,7 @@ class ObserverManager {
     Dependencies dependencies_;
     Dependencies* previousDepedencies_;
 
-    static FOLLY_TLS Dependencies* currentDependencies_;
+    static thread_local Dependencies* currentDependencies_;
   };
 
  private:
@@ -222,7 +195,7 @@ class ObserverManager {
 
   static ObserverManager& getInstance();
   static std::shared_ptr<UpdatesManager> getUpdatesManager();
-  static FOLLY_TLS bool inManagerThread_;
+  static thread_local bool inManagerThread_;
 
   /**
    * Version mutex is used to make sure all updates are processed from the

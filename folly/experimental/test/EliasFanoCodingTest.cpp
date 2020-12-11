@@ -93,14 +93,13 @@ class EliasFanoCodingTest : public ::testing::Test {
   template <
       size_t kSkipQuantum,
       size_t kForwardQuantum,
-      class ValueType,
+      typename ValueType,
+      typename SkipValueType,
       bool kUpperFirst>
-  void doTestAll() {
-    // SkipValueType and SizeType could both be narrower than ValueType, but
-    // testing all combinations would be slow, so assume they are all the same.
+  void doTest() {
     typedef EliasFanoEncoderV2<
         ValueType,
-        ValueType,
+        SkipValueType,
         kSkipQuantum,
         kForwardQuantum,
         kUpperFirst>
@@ -115,6 +114,21 @@ class EliasFanoCodingTest : public ::testing::Test {
     // TODO(ott): It should be possible to lift this constraint.
     testAll<Reader, Encoder>({0, 1, std::numeric_limits<uint32_t>::max() - 1});
   }
+
+  template <size_t kSkipQuantum, size_t kForwardQuantum, typename ValueType>
+  void doTestAll() {
+    // Note: SkipValue of uint8/16 aren't well-supported. For now we only test
+    // ValueType for uint32/64.
+    static_assert(
+        std::is_same<ValueType, uint32_t>::value ||
+        std::is_same<ValueType, uint64_t>::value);
+    // TODO(ott): improve test coverage for SkipValue of uint8/16 once such
+    // types are well supported.
+    doTest<kSkipQuantum, kForwardQuantum, ValueType, uint32_t, true>();
+    doTest<kSkipQuantum, kForwardQuantum, ValueType, uint32_t, false>();
+    doTest<kSkipQuantum, kForwardQuantum, ValueType, uint64_t, true>();
+    doTest<kSkipQuantum, kForwardQuantum, ValueType, uint64_t, false>();
+  }
 };
 
 TEST_F(EliasFanoCodingTest, Empty) {
@@ -122,31 +136,23 @@ TEST_F(EliasFanoCodingTest, Empty) {
 }
 
 TEST_F(EliasFanoCodingTest, Simple) {
-  doTestAll<0, 0, uint32_t, false>();
-  doTestAll<0, 0, uint32_t, true>();
-  doTestAll<0, 0, uint64_t, false>();
-  doTestAll<0, 0, uint64_t, true>();
+  doTestAll<0, 0, uint32_t>();
+  doTestAll<0, 0, uint64_t>();
 }
 
 TEST_F(EliasFanoCodingTest, SkipPointers) {
-  doTestAll<128, 0, uint32_t, false>();
-  doTestAll<128, 0, uint32_t, true>();
-  doTestAll<128, 0, uint64_t, false>();
-  doTestAll<128, 0, uint64_t, true>();
+  doTestAll<128, 0, uint32_t>();
+  doTestAll<128, 0, uint64_t>();
 }
 
 TEST_F(EliasFanoCodingTest, ForwardPointers) {
-  doTestAll<0, 128, uint32_t, false>();
-  doTestAll<0, 128, uint32_t, true>();
-  doTestAll<0, 128, uint64_t, false>();
-  doTestAll<0, 128, uint64_t, true>();
+  doTestAll<0, 128, uint32_t>();
+  doTestAll<0, 128, uint64_t>();
 }
 
 TEST_F(EliasFanoCodingTest, SkipForwardPointers) {
-  doTestAll<128, 128, uint32_t, false>();
-  doTestAll<128, 128, uint32_t, true>();
-  doTestAll<128, 128, uint64_t, false>();
-  doTestAll<128, 128, uint64_t, true>();
+  doTestAll<128, 128, uint32_t>();
+  doTestAll<128, 128, uint64_t>();
 }
 
 TEST_F(EliasFanoCodingTest, BugLargeGapInUpperBits) { // t16274876
@@ -310,36 +316,35 @@ BENCHMARK(slowDefaultNumLowerBits, iters) {
 }
 
 #if 0
-// Intel(R) Xeon(R) CPU E5-2678 v3 @ 2.50GHz (turbo on),
-// Using GCC 5 with --bm_min_usec 100000.
-V1008 12:29:33.646595 87744 Instructions.h:161] Will use folly::compression::instructions::Haswell
+// Intel(R) Xeon(R) CPU E5-2678 v3 @ 2.50GHz, Clang 8.0.
+// $ eliasfano_test --benchmark --bm_min_usec 200000
 ============================================================================
 folly/experimental/test/EliasFanoCodingTest.cpp relative  time/iter  iters/s
 ============================================================================
-Next                                                         2.47ns  405.58M
-Skip_ForwardQ128(1)                                          6.68ns  149.67M
-Skip_ForwardQ128(2)                                          7.67ns  130.30M
-Skip_ForwardQ128(4_pm_1)                                     9.12ns  109.65M
-Skip_ForwardQ128(16_pm_4)                                    9.95ns  100.53M
-Skip_ForwardQ128(64_pm_16)                                  12.76ns   78.40M
-Skip_ForwardQ128(256_pm_64)                                 18.09ns   55.27M
-Skip_ForwardQ128(1024_pm_256)                               19.13ns   52.28M
-Jump_ForwardQ128                                            20.27ns   49.33M
+Next                                                         2.58ns  388.22M
+Skip_ForwardQ128(1)                                          4.81ns  207.72M
+Skip_ForwardQ128(2)                                          5.96ns  167.75M
+Skip_ForwardQ128(4_pm_1)                                     7.40ns  135.16M
+Skip_ForwardQ128(16_pm_4)                                    8.20ns  121.97M
+Skip_ForwardQ128(64_pm_16)                                  12.04ns   83.06M
+Skip_ForwardQ128(256_pm_64)                                 16.84ns   59.39M
+Skip_ForwardQ128(1024_pm_256)                               17.67ns   56.61M
+Jump_ForwardQ128                                            25.37ns   39.41M
 ----------------------------------------------------------------------------
-SkipTo_SkipQ128(1)                                           8.35ns  119.76M
-SkipTo_SkipQ128(2)                                          12.37ns   80.85M
-SkipTo_SkipQ128(4_pm_1)                                     15.05ns   66.44M
-SkipTo_SkipQ128(16_pm_4)                                    22.90ns   43.66M
-SkipTo_SkipQ128(64_pm_16)                                   34.11ns   29.31M
-SkipTo_SkipQ128(256_pm_64)                                  38.68ns   25.85M
-SkipTo_SkipQ128(1024_pm_256)                                41.75ns   23.95M
-JumpTo_SkipQ128                                             44.79ns   22.33M
+SkipTo_SkipQ128(1)                                           7.27ns  137.59M
+SkipTo_SkipQ128(2)                                          10.99ns   91.01M
+SkipTo_SkipQ128(4_pm_1)                                     13.53ns   73.93M
+SkipTo_SkipQ128(16_pm_4)                                    20.58ns   48.59M
+SkipTo_SkipQ128(64_pm_16)                                   32.08ns   31.18M
+SkipTo_SkipQ128(256_pm_64)                                  38.66ns   25.87M
+SkipTo_SkipQ128(1024_pm_256)                                42.32ns   23.63M
+JumpTo_SkipQ128                                             47.95ns   20.86M
 ----------------------------------------------------------------------------
-Encode_10                                                  120.33ns    8.31M
-Encode                                                       7.61ms   131.32
+Encode_10                                                  103.99ns    9.62M
+Encode                                                       7.60ms   131.53
 ----------------------------------------------------------------------------
-defaultNumLowerBits                                          3.69ns  270.74M
-slowDefaultNumLowerBits                                     10.90ns   91.73M
+defaultNumLowerBits                                          3.59ns  278.69M
+slowDefaultNumLowerBits                                     10.88ns   91.90M
 ============================================================================
 #endif
 

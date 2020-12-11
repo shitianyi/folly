@@ -16,7 +16,7 @@ jobs:
     steps:
     - uses: actions/checkout@v1
     - name: Export boost environment
-      run: "echo ::set-env name=BOOST_ROOT::%BOOST_ROOT_1_69_0%"
+      run: "echo BOOST_ROOT=%BOOST_ROOT_1_69_0% >> %GITHUB_ENV%"
       shell: cmd
     - name: Fix Git config
       run: git config --system core.longpaths true
@@ -42,6 +42,8 @@ jobs:
       run: python build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests googletest
     - name: Fetch libevent
       run: python build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests libevent
+    - name: Fetch lz4
+      run: python build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests lz4
     - name: Fetch snappy
       run: python build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests snappy
     - name: Fetch zlib
@@ -70,6 +72,8 @@ jobs:
       run: python build/fbcode_builder/getdeps.py --allow-system-packages build --no-tests googletest
     - name: Build libevent
       run: python build/fbcode_builder/getdeps.py --allow-system-packages build --no-tests libevent
+    - name: Build lz4
+      run: python build/fbcode_builder/getdeps.py --allow-system-packages build --no-tests lz4
     - name: Build snappy
       run: python build/fbcode_builder/getdeps.py --allow-system-packages build --no-tests snappy
     - name: Build zlib

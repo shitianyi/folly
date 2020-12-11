@@ -28,12 +28,8 @@ TEST_F(UtilityTest, copy) {
   struct MyData {};
   struct Worker {
     size_t rrefs = 0, crefs = 0;
-    void something(MyData&&) {
-      ++rrefs;
-    }
-    void something(const MyData&) {
-      ++crefs;
-    }
+    void something(MyData&&) { ++rrefs; }
+    void something(const MyData&) { ++crefs; }
   };
 
   MyData data;
@@ -63,12 +59,8 @@ TEST_F(UtilityTest, copy_noexcept_spec) {
 
 TEST_F(UtilityTest, as_const) {
   struct S {
-    bool member() {
-      return false;
-    }
-    bool member() const {
-      return true;
-    }
+    bool member() { return false; }
+    bool member() const { return true; }
   };
   S s;
   EXPECT_FALSE(s.member());
@@ -143,3 +135,10 @@ TEST_F(UtilityTest, to_narrow) {
     EXPECT_EQ(100, actual);
   }
 }
+
+// Tests for FOLLY_DECLVAL macro:
+
+static_assert(std::is_same<decltype(FOLLY_DECLVAL(int)), int>::value);
+static_assert(std::is_same<decltype(FOLLY_DECLVAL(int&)), int&>::value);
+static_assert(std::is_same<decltype(FOLLY_DECLVAL(int&&)), int&&>::value);
+static_assert(noexcept(FOLLY_DECLVAL(int)));

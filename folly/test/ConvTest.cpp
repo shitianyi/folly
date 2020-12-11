@@ -318,7 +318,7 @@ void testString2Integral() {
         (Uint)4147483648U,
         (Uint)4000000000U,
     };
-    FOR_EACH_RANGE (i, 0, sizeof(uStrings2) / sizeof(uStrings2)) {
+    FOR_EACH_RANGE (i, 0, sizeof(uStrings2) / sizeof(*uStrings2)) {
       EXPECT_EQ(to<Uint>(uStrings2[i]), uValues2[i]);
       if (sizeof(Int) == 4) {
         EXPECT_THROW(to<Sint>(uStrings2[i]), std::range_error);
@@ -902,6 +902,25 @@ TEST(Conv, FloatToBool) {
   EXPECT_EQ(to<bool>(-std::numeric_limits<double>::infinity()), true);
 }
 
+TEST(Conv, RoundTripFloatToStringToFloat) {
+  const std::array<float, 6> kTests{{
+      3.14159f,
+      12345678.f,
+      numeric_limits<float>::lowest(),
+      numeric_limits<float>::max(),
+      numeric_limits<float>::infinity(),
+      -numeric_limits<float>::infinity(),
+  }};
+
+  for (const auto& test : kTests) {
+    SCOPED_TRACE(to<string>(test));
+    EXPECT_EQ(to<float>(to<string>(test)), test);
+  }
+
+  EXPECT_TRUE(
+      std::isnan(to<float>(to<string>(numeric_limits<float>::quiet_NaN()))));
+}
+
 namespace {
 
 template <typename F>
@@ -969,8 +988,16 @@ TEST(Conv, ConversionErrorStrToFloat) {
   EXPECT_CONV_ERROR_STR_NOVAL(float, StringPiece(), EMPTY_INPUT_STRING);
   EXPECT_CONV_ERROR_STR_NOVAL(float, "", EMPTY_INPUT_STRING);
   EXPECT_CONV_ERROR_STR(float, "  ", EMPTY_INPUT_STRING);
+  EXPECT_CONV_ERROR_STR(float, "\t", EMPTY_INPUT_STRING);
   EXPECT_CONV_ERROR_STR(float, "  junk", STRING_TO_FLOAT_ERROR);
   EXPECT_CONV_ERROR(to<float>("  1bla"), NON_WHITESPACE_AFTER_END, "bla");
+
+  EXPECT_CONV_ERROR_STR_NOVAL(double, StringPiece(), EMPTY_INPUT_STRING);
+  EXPECT_CONV_ERROR_STR_NOVAL(double, "", EMPTY_INPUT_STRING);
+  EXPECT_CONV_ERROR_STR(double, "  ", EMPTY_INPUT_STRING);
+  EXPECT_CONV_ERROR_STR(double, "\t", EMPTY_INPUT_STRING);
+  EXPECT_CONV_ERROR_STR(double, "  junk", STRING_TO_FLOAT_ERROR);
+  EXPECT_CONV_ERROR(to<double>("  1bla"), NON_WHITESPACE_AFTER_END, "bla");
 }
 
 TEST(Conv, ConversionErrorStrToInt) {
@@ -1201,6 +1228,45 @@ TEST(Conv, TryStringToFloat) {
   auto rv2 = folly::tryTo<float>("3.14");
   EXPECT_TRUE(rv2.hasValue());
   EXPECT_NEAR(rv2.value(), 3.14, 1e-5);
+  // No trailing '\0' to expose 1-byte buffer over-read
+  char x = '-';
+  auto rv3 = folly::tryTo<float>(folly::StringPiece(&x, 1));
+  EXPECT_FALSE(rv3.hasValue());
+
+  // Exact conversion at numeric limits (8+ decimal digits)
+  auto rv4 = folly::tryTo<float>("-3.4028235E38");
+  EXPECT_TRUE(rv4.hasValue());
+  EXPECT_EQ(rv4.value(), numeric_limits<float>::lowest());
+  auto rv5 = folly::tryTo<float>("3.40282346E38");
+  EXPECT_TRUE(rv5.hasValue());
+  EXPECT_EQ(rv5.value(), numeric_limits<float>::max());
+
+  // Beyond numeric limits
+  // numeric_limits<float>::lowest() ~= -3.402823466E38
+  const std::array<folly::StringPiece, 4> kOversizedInputs{{
+      "-3.403E38",
+      "-3.4029E38",
+      "-3.402824E38",
+      "-3.4028236E38",
+  }};
+  for (const auto& input : kOversizedInputs) {
+    auto rv = folly::tryTo<float>(input);
+    EXPECT_EQ(rv.value(), -numeric_limits<float>::infinity()) << input;
+  }
+
+  // NaN
+  const std::array<folly::StringPiece, 6> kNanInputs{{
+      "nan",
+      "NaN",
+      "NAN",
+      "-nan",
+      "-NaN",
+      "-NAN",
+  }};
+  for (const auto& input : kNanInputs) {
+    auto rv = folly::tryTo<float>(input);
+    EXPECT_TRUE(std::isnan(rv.value())) << input;
+  }
 }
 
 TEST(Conv, TryStringToDouble) {
@@ -1209,6 +1275,10 @@ TEST(Conv, TryStringToDouble) {
   auto rv2 = folly::tryTo<double>("3.14");
   EXPECT_TRUE(rv2.hasValue());
   EXPECT_NEAR(rv2.value(), 3.14, 1e-10);
+  // No trailing '\0' to expose 1-byte buffer over-read
+  char y = '\t';
+  auto rv4 = folly::tryTo<double>(folly::StringPiece(&y, 1));
+  EXPECT_FALSE(rv4.hasValue());
 }
 
 TEST(Conv, TryIntToInt) {
@@ -1318,9 +1388,7 @@ TEST(Conv, allocate_size) {
 namespace my {
 struct Dimensions {
   int w, h;
-  std::tuple<const int&, const int&> tuple_view() const {
-    return tie(w, h);
-  }
+  std::tuple<const int&, const int&> tuple_view() const { return tie(w, h); }
   bool operator==(const Dimensions& other) const {
     return this->tuple_view() == other.tuple_view();
   }
